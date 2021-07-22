@@ -37,6 +37,8 @@ import com.squareup.wire.schema.internal.parser.MessageElement;
 import io.confluent.connect.protobuf.ProtobufData.SchemaWrapper;
 import io.confluent.connect.protobuf.test.KeyValueWrapper;
 import io.confluent.connect.protobuf.test.RecursiveKeyValue;
+import io.confluent.kafka.serializers.protobuf.test.DateTimeValueOuterClass;
+import io.confluent.kafka.serializers.protobuf.test.DateTimeValueOuterClass.DateTimeValue;
 import io.confluent.kafka.serializers.protobuf.test.DateValueOuterClass;
 import io.confluent.kafka.serializers.protobuf.test.DateValueOuterClass.DateValue;
 import io.confluent.kafka.serializers.protobuf.test.DecimalValueOuterClass;
@@ -754,7 +756,7 @@ public class ProtobufDataTest {
   }
 
   @Test
-  public void testToConnectTimestamp() throws Exception {
+  public void testToConnectTimestampForTimestampMessageType() throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy/MM/dd");
     sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
     java.util.Date expectedValue = sdf.parse("2017/12/31");
@@ -770,6 +772,34 @@ public class ProtobufDataTest {
         .optional()
         .parameter(PROTOBUF_TYPE_TAG, String.valueOf(1))
         .build();
+    assertEquals(getExpectedSchemaAndValue(timestampSchema, message, expectedValue), result);
+  }
+
+  @Test
+  public void testToConnectTimestampForDateTimeMessageType() throws Exception {
+    SimpleDateFormat sdf = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+    sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+    java.util.Date expectedValue = sdf.parse("1996/03/31 10:00:00");
+    com.google.type.DateTime.Builder dateTimeBuilder = com.google.type.DateTime.newBuilder();
+    dateTimeBuilder.setYear(1996);
+    dateTimeBuilder.setMonth(3);
+    dateTimeBuilder.setDay(31);
+    dateTimeBuilder.setHours(2);
+    dateTimeBuilder.setMinutes(0);
+    dateTimeBuilder.setSeconds(0);
+    com.google.protobuf.Duration duration = com.google.protobuf.Duration.newBuilder()
+            .setSeconds(-28800).build();
+    dateTimeBuilder.setUtcOffset(duration);
+    DateTimeValueOuterClass.DateTimeValue.Builder builder = DateTimeValueOuterClass.DateTimeValue.newBuilder();
+    builder.setValue(dateTimeBuilder.build());
+    DateTimeValueOuterClass.DateTimeValue message = builder.build();
+
+    SchemaAndValue result = getSchemaAndValue(message);
+
+    Schema timestampSchema = org.apache.kafka.connect.data.Timestamp.builder()
+            .optional()
+            .parameter(PROTOBUF_TYPE_TAG, String.valueOf(1))
+            .build();
     assertEquals(getExpectedSchemaAndValue(timestampSchema, message, expectedValue), result);
   }
 
@@ -794,6 +824,13 @@ public class ProtobufDataTest {
 
   private byte[] getMessageBytes(ProtobufData protobufData, SchemaAndValue schemaAndValue) throws Exception {
     ProtobufSchemaAndValue protobufSchemaAndValue = protobufData.fromConnectData(schemaAndValue);
+    DynamicMessage dynamicMessage = (DynamicMessage) protobufSchemaAndValue.getValue();
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    dynamicMessage.writeTo(baos);
+    return baos.toByteArray();
+  }
+
+  private byte[] getMessageBytes(ProtobufSchemaAndValue protobufSchemaAndValue) throws Exception {
     DynamicMessage dynamicMessage = (DynamicMessage) protobufSchemaAndValue.getValue();
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     dynamicMessage.writeTo(baos);
@@ -1223,6 +1260,164 @@ public class ProtobufDataTest {
     Descriptors.FieldDescriptor fieldDescriptor = message.getDescriptorForType()
         .findFieldByName(VALUE_FIELD_NAME);
     assertEquals(timestamp, message.getField(fieldDescriptor));
+  }
+
+  @Test
+  public void testFromDebeziumDate() throws Exception {
+    com.google.type.Date date = com.google.type.Date.newBuilder()
+            .setYear(2021)
+            .setMonth(7)
+            .setDay(20)
+            .build();
+    // corresponds to 07/20/2021
+    final Integer DAYS_TIMESTAMP = 18828;
+    Schema kafkaConnectSchema = SchemaBuilder
+            .struct()
+            .field(VALUE_FIELD_NAME, io.debezium.time.Date.schema())
+            .build();
+    Struct kafkaConnectStruct = new Struct(kafkaConnectSchema);
+    kafkaConnectStruct.put(VALUE_FIELD_NAME, DAYS_TIMESTAMP);
+
+    ProtobufDataConfig protobufDataConfig = new ProtobufDataConfig.Builder()
+            .with(ProtobufDataConfig.CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG, true)
+            .build();
+    ProtobufData protobufData = new ProtobufData(protobufDataConfig);
+    ProtobufSchemaAndValue protobufSchemaAndValue = protobufData.fromConnectData(kafkaConnectSchema, kafkaConnectStruct);
+    byte[] messageBytes = getMessageBytes(protobufSchemaAndValue);
+    Message message = DateValue.parseFrom(messageBytes);
+
+    assertEquals(1, message.getAllFields().size());
+    Descriptors.FieldDescriptor fieldDescriptor = message.getDescriptorForType()
+            .findFieldByName(VALUE_FIELD_NAME);
+
+    assertEquals(date, message.getField(fieldDescriptor));
+  }
+
+  @Test
+  public void testDebeziumMicroTimeType() throws Exception {
+    com.google.type.TimeOfDay time = com.google.type.TimeOfDay.newBuilder()
+            .setHours(12)
+            .setMinutes(12)
+            .setSeconds(13)
+            .setNanos(14_000_0000)
+            .build();
+    // corresponds to Time 12:12:13.14
+    final Long MICRO_TIME =  43933140000L;
+    Schema kafkaConnectSchema = SchemaBuilder
+            .struct()
+            .field(VALUE_FIELD_NAME, io.debezium.time.MicroTime.schema())
+            .build();
+    Struct kafkaConnectStruct = new Struct(kafkaConnectSchema);
+    kafkaConnectStruct.put(VALUE_FIELD_NAME, MICRO_TIME);
+
+    ProtobufDataConfig protobufDataConfig = new ProtobufDataConfig.Builder()
+            .with(ProtobufDataConfig.CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG, true)
+            .build();
+    ProtobufData protobufData = new ProtobufData(protobufDataConfig);
+    ProtobufSchemaAndValue protobufSchemaAndValue = protobufData.fromConnectData(kafkaConnectSchema, kafkaConnectStruct);
+    byte[] messageBytes = getMessageBytes(protobufSchemaAndValue);
+    Message message = TimeOfDayValue.parseFrom(messageBytes);
+
+    assertEquals(1, message.getAllFields().size());
+    Descriptors.FieldDescriptor fieldDescriptor = message.getDescriptorForType()
+            .findFieldByName(VALUE_FIELD_NAME);
+
+    assertEquals(time, message.getField(fieldDescriptor));
+  }
+
+  @Test
+  public void testDebeziumTimestampType() throws Exception {
+    // corresponds to July 20, 2021 12:00:00.300 AM UTC
+    final long TIMESTAMP = 1626739200300L;
+    Timestamp timestamp = Timestamps.fromMillis(TIMESTAMP);
+
+    Schema kafkaConnectSchema = SchemaBuilder
+            .struct()
+            .field(VALUE_FIELD_NAME, io.debezium.time.Timestamp.schema())
+            .build();
+    Struct kafkaConnectStruct = new Struct(kafkaConnectSchema);
+    kafkaConnectStruct.put(VALUE_FIELD_NAME, TIMESTAMP);
+
+    ProtobufDataConfig protobufDataConfig = new ProtobufDataConfig.Builder()
+            .with(ProtobufDataConfig.CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG, true)
+            .build();
+    ProtobufData protobufData = new ProtobufData(protobufDataConfig);
+    ProtobufSchemaAndValue protobufSchemaAndValue = protobufData.fromConnectData(kafkaConnectSchema, kafkaConnectStruct);
+    byte[] messageBytes = getMessageBytes(protobufSchemaAndValue);
+    Message message = TimestampValue.parseFrom(messageBytes);
+
+    assertEquals(1, message.getAllFields().size());
+
+    Descriptors.FieldDescriptor fieldDescriptor = message.getDescriptorForType()
+            .findFieldByName(VALUE_FIELD_NAME);
+    assertEquals(timestamp, message.getField(fieldDescriptor));
+  }
+
+  @Test
+  public void testDebeziumMicroTimestampType() throws Exception {
+    // corresponds to July 20, 2021 12:00:12.300123 AM UTC
+    final long MICRO_TIMESTAMP =  1626739212300123L;
+    Timestamp timestamp = Timestamps.fromMicros(MICRO_TIMESTAMP);
+
+    Schema kafkaConnectSchema = SchemaBuilder
+            .struct()
+            .field(VALUE_FIELD_NAME, io.debezium.time.MicroTimestamp.schema())
+            .build();
+    Struct kafkaConnectStruct = new Struct(kafkaConnectSchema);
+    kafkaConnectStruct.put(VALUE_FIELD_NAME, MICRO_TIMESTAMP);
+
+    ProtobufDataConfig protobufDataConfig = new ProtobufDataConfig.Builder()
+            .with(ProtobufDataConfig.CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG, true)
+            .build();
+    ProtobufData protobufData = new ProtobufData(protobufDataConfig);
+    ProtobufSchemaAndValue protobufSchemaAndValue = protobufData.fromConnectData(kafkaConnectSchema, kafkaConnectStruct);
+    byte[] messageBytes = getMessageBytes(protobufSchemaAndValue);
+    Message message = TimestampValue.parseFrom(messageBytes);
+
+    assertEquals(1, message.getAllFields().size());
+
+    Descriptors.FieldDescriptor fieldDescriptor = message.getDescriptorForType()
+            .findFieldByName(VALUE_FIELD_NAME);
+    assertEquals(timestamp, message.getField(fieldDescriptor));
+  }
+
+  @Test
+  public void testDebeziumZonedTimestampLogicalType() throws Exception {
+    final String ZONED_TIMESTAMP = "2011-12-03T10:15:30.030431+01:00";
+    com.google.protobuf.Duration duration = com.google.protobuf.Duration.newBuilder()
+            .setSeconds(3600).build();
+    com.google.type.DateTime dateTime = com.google.type.DateTime.newBuilder()
+            .setYear(2011)
+            .setMonth(12)
+            .setDay(3)
+            .setHours(10)
+            .setMinutes(15)
+            .setSeconds(30)
+            .setNanos(30431000)
+            .setUtcOffset(duration)
+            .build();
+
+    DateTimeValue.Builder builder = DateTimeValue.newBuilder();
+    builder.setValue(dateTime);
+    Schema kafkaConnectSchema = SchemaBuilder
+            .struct()
+            .field(VALUE_FIELD_NAME, io.debezium.time.ZonedTimestamp.schema())
+            .build();
+    Struct kafkaConnectStruct = new Struct(kafkaConnectSchema);
+    kafkaConnectStruct.put(VALUE_FIELD_NAME, ZONED_TIMESTAMP);
+
+    ProtobufDataConfig protobufDataConfig = new ProtobufDataConfig.Builder()
+            .with(ProtobufDataConfig.CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG, true)
+            .build();
+    ProtobufData protobufData = new ProtobufData(protobufDataConfig);
+    ProtobufSchemaAndValue protobufSchemaAndValue = protobufData.fromConnectData(kafkaConnectSchema, kafkaConnectStruct);
+    byte[] messageBytes = getMessageBytes(protobufSchemaAndValue);
+    Message message = DateTimeValue.parseFrom(messageBytes);
+
+    assertEquals(1, message.getAllFields().size());
+    Descriptors.FieldDescriptor fieldDescriptor = message.getDescriptorForType()
+            .findFieldByName(VALUE_FIELD_NAME);
+    assertEquals(dateTime, message.getField(fieldDescriptor));
   }
 
   @Test

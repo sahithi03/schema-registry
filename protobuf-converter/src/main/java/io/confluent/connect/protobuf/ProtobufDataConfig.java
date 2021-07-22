@@ -45,6 +45,11 @@ public class ProtobufDataConfig extends AbstractConfig {
   public static final int SCHEMAS_CACHE_SIZE_DEFAULT = 1000;
   public static final String SCHEMAS_CACHE_SIZE_DOC = "Size of the converted schemas cache";
 
+  public static final String CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG = "convert.debezium.logical.types";
+  public static final boolean CONVERT_DEBEZIUM_LOGICAL_TYPES_DEFAULT = false;
+  public static final String CONVERT_DEBEZIUM_LOGICAL_TYPES_DOC =
+          "Whether to convert debezium logical types to the corresponding protobuf types";
+
   public static ConfigDef baseConfigDef() {
     return new ConfigDef()
         .define(ENHANCED_PROTOBUF_SCHEMA_SUPPORT_CONFIG,
@@ -63,7 +68,12 @@ public class ProtobufDataConfig extends AbstractConfig {
             ConfigDef.Type.INT,
             SCHEMAS_CACHE_SIZE_DEFAULT,
             ConfigDef.Importance.LOW,
-            SCHEMAS_CACHE_SIZE_DOC
+            SCHEMAS_CACHE_SIZE_DOC)
+        .define(CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG,
+            ConfigDef.Type.BOOLEAN,
+            CONVERT_DEBEZIUM_LOGICAL_TYPES_DEFAULT,
+            ConfigDef.Importance.MEDIUM,
+            CONVERT_DEBEZIUM_LOGICAL_TYPES_DOC
         );
   }
 
@@ -85,6 +95,10 @@ public class ProtobufDataConfig extends AbstractConfig {
 
   public int schemaCacheSize() {
     return this.getInt(SCHEMAS_CACHE_SIZE_CONFIG);
+  }
+
+  public boolean allowDebeziumLogicalTypesConversion() {
+    return this.getBoolean(CONVERT_DEBEZIUM_LOGICAL_TYPES_CONFIG);
   }
 
   public static class Builder {

@@ -40,11 +40,15 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.Calendar;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.apache.kafka.common.cache.Cache;
 import org.apache.kafka.common.cache.LRUCache;
@@ -67,6 +71,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+
+import io.debezium.time.ZonedTimestamp;
+import io.debezium.time.MicroTime;
+import io.debezium.time.MicroTimestamp;
 
 import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
 import io.confluent.kafka.schemaregistry.protobuf.dynamic.DynamicSchema;
@@ -105,6 +113,8 @@ public class ProtobufData {
   public static final String PROTOBUF_TIME_TYPE = "google.type.TimeOfDay";
   public static final String PROTOBUF_TIMESTAMP_LOCATION = "google/protobuf/timestamp.proto";
   public static final String PROTOBUF_TIMESTAMP_TYPE = "google.protobuf.Timestamp";
+  public static final String PROTOBUF_DATETIME_LOCATION = "google/type/datetime.proto";
+  public static final String PROTOBUF_DATETIME_TYPE = "google.type.DateTime";
 
   public static final String PROTOBUF_WRAPPER_LOCATION = "google/protobuf/wrappers.proto";
   public static final String PROTOBUF_DOUBLE_WRAPPER_TYPE = "google.protobuf.DoubleValue";
@@ -207,20 +217,61 @@ public class ProtobufData {
             + value.getClass());
       }
       Message message = (Message) value;
-      long seconds = 0L;
-      int nanos = 0;
-      for (Map.Entry<FieldDescriptor, Object> entry : message.getAllFields().entrySet()) {
-        if (entry.getKey().getName().equals("seconds")) {
-          seconds = ((Number) entry.getValue()).longValue();
-        } else if (entry.getKey().getName().equals("nanos")) {
-          nanos = ((Number) entry.getValue()).intValue();
+      if (message.getDescriptorForType().getName().equals("Timestamp")) {
+        long seconds = 0L;
+        int nanos = 0;
+        for (Map.Entry<FieldDescriptor, Object> entry : message.getAllFields().entrySet()) {
+          if (entry.getKey().getName().equals("seconds")) {
+            seconds = ((Number) entry.getValue()).longValue();
+          } else if (entry.getKey().getName().equals("nanos")) {
+            nanos = ((Number) entry.getValue()).intValue();
+          }
         }
+        com.google.protobuf.Timestamp timestamp = com.google.protobuf.Timestamp.newBuilder()
+            .setSeconds(seconds)
+            .setNanos(nanos)
+            .build();
+        return Timestamp.toLogical(schema, Timestamps.toMillis(timestamp));
+      } else if (message.getDescriptorForType().getName().equals("DateTime")) {
+        int year = 0;
+        int month = 0;
+        int day = 0;
+        int hours = 0;
+        int minutes = 0;
+        int seconds = 0;
+        int nanos = 0;
+        long offset = 0;
+        for (Map.Entry<FieldDescriptor, Object> entry : message.getAllFields().entrySet()) {
+          if (entry.getKey().getName().equals("year")) {
+            year = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("month")) {
+            month = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("day")) {
+            day = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("hours")) {
+            hours = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("minutes")) {
+            minutes = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("seconds")) {
+            seconds = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("nanos")) {
+            nanos = ((Number) entry.getValue()).intValue();
+          } else if (entry.getKey().getName().equals("utc_offset")) {
+            DynamicMessage msg = (DynamicMessage) entry.getValue();
+            for (Map.Entry<FieldDescriptor, Object> nested_entry : msg.getAllFields().entrySet()){
+              if (nested_entry.getKey().getName().equals("seconds")) {
+                offset = ((Number) nested_entry.getValue()).longValue();
+              }
+            }
+          }
+        }
+        ZoneOffset zoneOffset = ZoneOffset.ofTotalSeconds((int) offset);
+        OffsetDateTime offsetDateTime = OffsetDateTime
+                .of(year, month, day, hours, minutes, seconds, nanos, zoneOffset);
+        return java.util.Date.from(offsetDateTime.toInstant());
+      } else {
+        throw new DataException("Unknown protobuf message type " + message.getDescriptorForType().getName());
       }
-      com.google.protobuf.Timestamp timestamp = com.google.protobuf.Timestamp.newBuilder()
-          .setSeconds(seconds)
-          .setNanos(nanos)
-          .build();
-      return Timestamp.toLogical(schema, Timestamps.toMillis(timestamp));
     });
   }
 
@@ -283,6 +334,83 @@ public class ProtobufData {
       java.util.Date date = (java.util.Date) value;
       return Timestamps.fromMillis(Timestamp.fromLogical(schema, date));
     });
+
+    TO_PROTOBUF_LOGICAL_CONVERTERS.put(io.debezium.time.Date.SCHEMA_NAME, (schema, value) -> {
+      if (!(value instanceof java.lang.Integer)) {
+        throw new DataException("Invalid type for Date, expected Integer but was " + value.getClass());
+      }
+      long msSinceEpoch = TimeUnit.DAYS.toMillis((Integer) value);
+      java.util.Date date = new java.util.Date(msSinceEpoch);
+      Calendar calendar = Calendar.getInstance(UTC);
+      calendar.setTime(date);
+      if (calendar.get(Calendar.HOUR_OF_DAY) != 0 || calendar.get(Calendar.MINUTE) != 0
+              || calendar.get(Calendar.SECOND) != 0 || calendar.get(Calendar.MILLISECOND) != 0) {
+        throw new DataException(
+                "Kafka Connect Date type should not have any time fields set to non-zero values.");
+      }
+      return com.google.type.Date.newBuilder()
+              .setYear(calendar.get(Calendar.YEAR))
+              .setMonth(calendar.get(Calendar.MONTH) + 1)
+              .setDay(calendar.get(Calendar.DAY_OF_MONTH))
+              .build();
+    });
+
+    TO_PROTOBUF_LOGICAL_CONVERTERS.put(io.debezium.time.MicroTime.SCHEMA_NAME, (schema, value) -> {
+      if (!(value instanceof java.lang.Long)) {
+        throw new DataException("Invalid type for Time, expected Long but was " + value.getClass());
+      }
+      long msSinceEpoch =  TimeUnit.MICROSECONDS.toMillis((Long) value);
+      if (msSinceEpoch < 0 || msSinceEpoch > MILLIS_PER_DAY) {
+        throw new DataException(
+                "Time values must use number of millis greater than 0 and less than 86400000");
+      }
+      long hours = TimeUnit.MILLISECONDS.toHours(msSinceEpoch);
+      msSinceEpoch -= TimeUnit.HOURS.toMillis(hours);
+      long minutes = TimeUnit.MILLISECONDS.toMinutes(msSinceEpoch);
+      msSinceEpoch -= TimeUnit.MINUTES.toMillis(minutes);
+      long seconds = TimeUnit.MILLISECONDS.toSeconds(msSinceEpoch);
+      msSinceEpoch -= TimeUnit.SECONDS.toMillis(seconds);
+      return com.google.type.TimeOfDay.newBuilder()
+              .setHours((int) hours)
+              .setMinutes((int) minutes)
+              .setSeconds((int) seconds)
+              .setNanos((int) (msSinceEpoch * MILLIS_PER_NANO))
+              .build();
+    });
+
+    TO_PROTOBUF_LOGICAL_CONVERTERS.put(io.debezium.time.Timestamp.SCHEMA_NAME, (schema, value) -> {
+      if (!(value instanceof Long)) {
+        throw new DataException("Invalid type for Timestamp, expected Long but was " + value.getClass());
+      }
+      return Timestamps.fromMillis((Long) value);
+    });
+
+    TO_PROTOBUF_LOGICAL_CONVERTERS.put(io.debezium.time.MicroTimestamp.SCHEMA_NAME, (schema, value) -> {
+      if (!(value instanceof Long)) {
+        throw new DataException("Invalid type for Timestamp, expected Long but was " + value.getClass());
+      }
+      return Timestamps.fromMicros((Long) value);
+    });
+
+    TO_PROTOBUF_LOGICAL_CONVERTERS.put(ZonedTimestamp.SCHEMA_NAME, (schema, value) -> {
+      if (!(value instanceof String)) {
+        throw new DataException("Invalid type for Zoned Timestamp, expected String but was " + value.getClass());
+      }
+      ZonedDateTime dateTime = ZonedDateTime.parse((String) value);
+      long UTCOffsetSeconds = dateTime.getOffset().getTotalSeconds();
+      com.google.protobuf.Duration duration = com.google.protobuf.Duration.newBuilder()
+              .setSeconds(UTCOffsetSeconds).build();
+      return com.google.type.DateTime.newBuilder()
+              .setYear(dateTime.getYear())
+              .setMonth(dateTime.getMonthValue())
+              .setDay(dateTime.getDayOfMonth())
+              .setHours(dateTime.getHour())
+              .setMinutes(dateTime.getMinute())
+              .setSeconds(dateTime.getSecond())
+              .setNanos(dateTime.getNano())
+              .setUtcOffset(duration)
+              .build();
+    });
   }
 
   private static Pattern NAME_START_CHAR = Pattern.compile("^[A-Za-z]");  // underscore not allowed
@@ -295,6 +423,7 @@ public class ProtobufData {
   private boolean enhancedSchemaSupport;
   private boolean scrubInvalidNames;
   private boolean useWrapperForNullables;
+  private boolean allowDebeziumLogicalTypesConversion;
 
   public ProtobufData() {
     this(new ProtobufDataConfig.Builder().with(
@@ -315,6 +444,7 @@ public class ProtobufData {
     this.enhancedSchemaSupport = protobufDataConfig.isEnhancedProtobufSchemaSupport();
     this.scrubInvalidNames = protobufDataConfig.isScrubInvalidNames();
     this.useWrapperForNullables = protobufDataConfig.useWrapperForNullables();
+    this.allowDebeziumLogicalTypesConversion = protobufDataConfig.allowDebeziumLogicalTypesConversion();
   }
 
   /**
@@ -779,6 +909,9 @@ public class ProtobufData {
       case PROTOBUF_TIMESTAMP_TYPE:
         dep = new ProtobufSchema(com.google.protobuf.Timestamp.getDescriptor());
         return dep.toDynamicSchema(PROTOBUF_TIMESTAMP_LOCATION);
+      case PROTOBUF_DATETIME_TYPE:
+        dep = new ProtobufSchema(com.google.type.DateTime.getDescriptor());
+        return dep.toDynamicSchema(PROTOBUF_DATETIME_LOCATION);
       case PROTOBUF_DOUBLE_WRAPPER_TYPE:
         dep = new ProtobufSchema(com.google.protobuf.DoubleValue.getDescriptor());
         return dep.toDynamicSchema(PROTOBUF_WRAPPER_LOCATION);
@@ -941,12 +1074,15 @@ public class ProtobufData {
         }
       }
       return PROTOBUF_DECIMAL_TYPE;
-    } else if (isDateSchema(schema)) {
+    } else if (isDateSchema(schema) || (allowDebeziumLogicalTypesConversion && isDebeziumDate(schema))) {
       return PROTOBUF_DATE_TYPE;
-    } else if (isTimeSchema(schema)) {
+    } else if (isTimeSchema(schema)|| (allowDebeziumLogicalTypesConversion && isDebeziumTime(schema))) {
       return PROTOBUF_TIME_TYPE;
-    } else if (isTimestampSchema(schema)) {
+    } else if (isTimestampSchema(schema) || (allowDebeziumLogicalTypesConversion &&
+            (isDebeziumTimeStamp(schema) || isDebeziumMicroTimeStamp(schema) ))) {
       return PROTOBUF_TIMESTAMP_TYPE;
+    } else if(allowDebeziumLogicalTypesConversion && isDebeziumZonedTimeStamp(schema)) {
+      return PROTOBUF_DATETIME_TYPE;
     }
     String defaultType;
     switch (schema.type()) {
@@ -1018,6 +1154,24 @@ public class ProtobufData {
       default:
         throw new DataException("Unknown schema type: " + schema.type());
     }
+  }
+
+  private boolean isDebeziumZonedTimeStamp(Schema schema) {
+    return ZonedTimestamp.SCHEMA_NAME.equals(schema.name());
+  }
+
+  private boolean isDebeziumTimeStamp(Schema schema) {
+    return io.debezium.time.Timestamp.SCHEMA_NAME.equals(schema.name());
+  }
+  private boolean isDebeziumMicroTimeStamp(Schema schema) {
+    return MicroTimestamp.SCHEMA_NAME.equals(schema.name());
+  }
+  private boolean isDebeziumDate(Schema schema) {
+    return io.debezium.time.Date.SCHEMA_NAME.equals(schema.name());
+  }
+
+  private boolean isDebeziumTime(Schema schema) {
+    return MicroTime.SCHEMA_NAME.equals(schema.name());
   }
 
   private boolean isDecimalSchema(Schema schema) {
@@ -1408,6 +1562,7 @@ public class ProtobufData {
             builder = Time.builder();
             break;
           case PROTOBUF_TIMESTAMP_TYPE:
+          case PROTOBUF_DATETIME_TYPE:
             builder = Timestamp.builder();
             break;
           default:
